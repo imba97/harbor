@@ -65,10 +65,17 @@ $ cargo harbor plan
 1 not published (publish = false):
   - acme-cli 0.4.0
 
-$ cargo harbor check v0.4.0        # tag vs workspace version, and a token is present
-$ cargo harbor publish             # upload, in that order
-$ cargo harbor publish --dry-run   # say what would happen
+$ cargo harbor check v0.4.0           # tag vs manifest version, and a token is present
+$ cargo harbor check v0.4.0 --plan    # ...and the plan is computable at all
+$ cargo harbor publish                # upload, in that order
+$ cargo harbor publish --dry-run      # say what would happen
 ```
+
+`check --plan` is worth its own line: computing the plan is offline and free, and it is the
+only thing that catches a dependency cycle, a published crate that depends on an excluded
+one, or a `members` pattern that matches nothing — all of which would otherwise surface half
+way through a release. The preflight runs before anything is uploaded either way; `--plan`
+is for the case where you want the *whole* question answered before the tag is pushed.
 
 That order is a topological sort: `acme-core` and `acme-macros` depend on nothing, so they
 go first (in name order, because ties are broken by name to keep the output stable);
@@ -82,6 +89,7 @@ configured — it falls out of the manifests.
 | `--no-locked` | Allow the release to change the lockfile. Off by default |
 | `--wait <s>` | Delay between index-propagation retries (default 10) |
 | `--attempts <n>` | Retry budget for index propagation (default 60) |
+| `check --plan` | Also compute the plan, so an unpublishable workspace fails at `check` |
 
 ## What it deliberately does not do
 
@@ -111,6 +119,20 @@ what order, and did it work — and answers it well enough to run unattended.
     # to everyone who can read the run.
     CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 ```
+
+### How this repository releases itself
+
+`.github/workflows/ci.yaml` is a reusable workflow — it has no trigger of its own and can
+only be called — and `release.yaml` calls it, so "do not publish until everything passes" is
+`needs:` rather than a matter of timing. Tag pushes (`v*.*.*`) are the only trigger.
+
+The publish job builds this crate from the tagged commit and uses it for its own preflight,
+which makes the release a real exercise of the tool. It then publishes with `cargo publish`
+rather than `harbor publish`, and that is deliberate: this crate's manifest sets
+`publish = false` — correct for a tool that is installed with `cargo install` and has no
+business being a dependency — and `harbor publish` honours that flag, so it would refuse to
+publish itself. The same flag is why there is no `harbor plan` step there: a plan for a
+workspace whose only crate is excluded is an empty plan, which proves nothing.
 
 ## Testing
 

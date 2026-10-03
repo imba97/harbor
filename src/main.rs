@@ -134,7 +134,7 @@ fn run(command: &Command, release: &Release) -> harbor::Result<()> {
         Command::Check { tag, plan } => {
             if let Some(tag) = tag {
                 let version = release.check_tag(tag)?;
-                println!("tag {tag} matches workspace version {version}");
+                println!("tag {tag} matches the manifest version {version}");
             }
             // Always checked: a release that cannot authenticate fails at the first upload,
             // which is a worse moment to find out than before anything is attempted.
@@ -191,5 +191,107 @@ fn print_plan(plan: &harbor::Plan) {
         for krate in excluded {
             println!("  - {} {}", krate.name, krate.version);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Parses a command line the way `main` would, so the tests exercise clap's
+    /// configuration rather than a hand-built `Cli`.
+    fn parse(args: &[&str]) -> clap::error::Result<Cli> {
+        let mut argv = vec!["cargo-harbor"];
+        argv.extend_from_slice(args);
+        Cli::try_parse_from(argv)
+    }
+
+    #[test]
+    fn the_prefix_defaults_to_no_filter() {
+        // The safe direction, and the one a workspace with no shared name family needs:
+        // a filter that is on by default silently drops crates from a release.
+        let cli = parse(&["plan"]).unwrap();
+        assert_eq!(cli.prefix, "");
+    }
+
+    #[test]
+    fn a_locked_release_is_the_default() {
+        let cli = parse(&["publish"]).unwrap();
+        assert!(!cli.no_locked, "a release must not rewrite the lockfile");
+    }
+
+    #[test]
+    fn the_publish_defaults_come_from_the_library() {
+        // These used to be literals here *and* in `config.rs`, which is a default that
+        // drifts. Parsing with no flags has to agree with `ReleaseConfig::default()`.
+        let cli = parse(&["publish"]).unwrap();
+        let defaults = ReleaseConfig::default();
+        match cli.command {
+            Command::Publish {
+                wait,
+                attempts,
+                dry_run,
+            } => {
+                assert_eq!(wait, defaults.retry_delay.as_secs());
+                assert_eq!(attempts, defaults.max_attempts);
+                assert!(!dry_run);
+            }
+            other => panic!("expected publish, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_without_a_tag_is_allowed_so_it_can_be_run_on_a_branch() {
+        let cli = parse(&["check"]).unwrap();
+        match cli.command {
+            Command::Check { tag, plan } => {
+                assert!(tag.is_none());
+                assert!(!plan, "computing the plan is opt-in");
+            }
+            other => panic!("expected check, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_takes_a_tag_and_the_plan_flag() {
+        let cli = parse(&["check", "v1.2.3", "--plan"]).unwrap();
+        match cli.command {
+            Command::Check { tag, plan } => {
+                assert_eq!(tag.as_deref(), Some("v1.2.3"));
+                assert!(plan);
+            }
+            other => panic!("expected check, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_rejects_a_second_positional_argument() {
+        // Silently ignoring it is how `check v1 v2` would look like it worked.
+        assert!(parse(&["check", "v1.0.0", "v2.0.0"]).is_err());
+    }
+
+    #[test]
+    fn root_and_prefix_are_global_flags() {
+        // They have to be accepted before *and* after the subcommand, because a workflow
+        // step and a person at a terminal tend to write them in different orders.
+        for args in [["--root", "/tmp/ws", "plan"], ["plan", "--root", "/tmp/ws"]] {
+            let cli = parse(&args).unwrap();
+            assert_eq!(cli.root, PathBuf::from("/tmp/ws"));
+        }
+    }
+
+    #[test]
+    fn an_unknown_subcommand_is_rejected() {
+        assert!(parse(&["publishh"]).is_err());
+    }
+
+    #[test]
+    fn a_dry_run_is_opt_in_and_only_on_publish() {
+        let cli = parse(&["publish", "--dry-run"]).unwrap();
+        match cli.command {
+            Command::Publish { dry_run, .. } => assert!(dry_run),
+            other => panic!("expected publish, got {other:?}"),
+        }
+        assert!(parse(&["plan", "--dry-run"]).is_err());
     }
 }

@@ -1,0 +1,122 @@
+name: Release
+
+# Publishing is not idempotent: a crate name and version pair can never be
+# reused, and a yanked version cannot be un-yanked. So this workflow is written
+# to refuse rather than to guess, and it is safe to re-run after a partial
+# failure because publishing a version that is already on the registry counts as
+# done rather than as an error.
+#
+# The checks live in ci.yaml, which this workflow calls. Keeping them in one run
+# is what makes the order structural.
+
+on:
+  push:
+    # The one and only trigger: `v<major>.<minor>.<patch>` tags. Nothing else
+    # starts a run, so nothing else can reach the registry, and the shape of a
+    # release tag is enforced here rather than by a script that has to remember
+    # to check it.
+    tags: [ "v*.*.*" ]
+
+# Read-only by default; the publishing job asks for nothing more.
+permissions:
+  contents: read
+
+jobs:
+  # Everything that can be checked without credentials: formatting, clippy, the
+  # test suite on three platforms, rustdoc, `cargo package`, and the MSRV build.
+  # Calling the whole file means publish waits for every job in it, matrix
+  # included, without listing them here.
+  checks:
+    name: Checks
+    uses: ./.github/workflows/ci.yaml
+
+  # ---------------------------------------------------------------------------
+  # crates.io. One crate, so there is no dependency order to respect and no index
+  # propagation to wait for.
+  #
+  # ⚠️ This job publishes with `cargo publish` rather than with `harbor publish`,
+  # and that is not an oversight. `harbor`'s own manifest sets `publish = false` —
+  # which is the correct declaration for a tool that is installed with
+  # `cargo install` and has no business on the registry as a dependency — and
+  # `harbor publish` honours that flag, so it would refuse to publish itself. It is
+  # also the reason there is no `harbor plan` step here: a plan for a workspace
+  # whose only crate is excluded is an empty plan, which proves nothing.
+  #
+  # What harbor *can* do for its own release is the preflight, and that is what it
+  # does below. That is also a genuine self-test: the command that decides whether
+  # a release may start is exercised by the release.
+  # ---------------------------------------------------------------------------
+  publish:
+    name: Publish to crates.io
+    needs: [ checks ]
+    runs-on: ubuntu-latest
+    # No `if:` needed: a tag push is the only way in, so reaching this job at all
+    # means a release was asked for, and `needs` means the checks have passed.
+    #
+    # No `environment:` either, on purpose. Declaring one moves the secret into
+    # environment scope and requires that environment to exist before the first
+    # run, for a gate this project does not need yet; the token is read from
+    # Settings -> Secrets and variables -> Actions instead. To add a manual
+    # approval gate later, create the environment, add `environment: <name>`
+    # back and move the secret into it.
+    permissions:
+      contents: read
+    env:
+      # Named once, so every step below means the same thing by "the workspace".
+      HARBOR_ROOT: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install stable toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      # Built from the tagged commit rather than installed from crates.io: the
+      # point is for this release to be checked by *this* revision of harbor. A
+      # published version would test the previous release, which is the opposite
+      # of useful here.
+      #
+      # No `rust-cache` in this job on purpose. Restoring the test job's cache is
+      # what made the reference workflow report cleanup errors about a
+      # `target/package/` tree this job never created.
+      - name: Build the release tool from this commit
+        run: cargo build --release --locked --bin cargo-harbor
+
+      # The preflight the release depends on, run by harbor itself. Two guards in
+      # one command: the tag names the version in the manifest, and a registry
+      # token is present. Doing nothing until both hold is the whole point.
+      #
+      # The token is passed through the environment and never as an argument, so it
+      # cannot reach a log by way of cargo echoing a command line. The tag is quoted
+      # for the same reason it is passed at all: `GITHUB_REF_NAME` comes from the
+      # event, and a tag is not the place to find out what happens without quotes.
+      - name: Check the release before starting it
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: ./target/release/cargo-harbor --root "$HARBOR_ROOT" check "$GITHUB_REF_NAME"
+
+      # `--locked` publishes exactly the dependency set CI tested, instead of
+      # quietly resolving a newer one at release time. There is no
+      # "is it already there?" probe before this: every probe available here lies
+      # (`cargo search` fuzzy-matches, `cargo info` resolves against the local
+      # workspace), so the publish error itself is the only trustworthy signal and
+      # it is what this branches on.
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          if output=$(cargo publish --locked 2>&1); then
+            echo "$output"
+            echo "published"
+          elif grep -qi 'already uploaded\|already exists' <<<"$output"; then
+            # A re-run after a partial release lands here. crates.io never allows a
+            # re-upload, so the version being there already is done, not failed.
+            echo "$output"
+            echo "this version is already on the registry, nothing to do"
+          else
+            echo "$output"
+            echo "::error::publishing failed"
+            exit 1
+          fi

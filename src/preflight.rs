@@ -20,38 +20,54 @@ use crate::manifest::Manifest;
 /// The name of the variable the token is read from.
 pub const TOKEN_VAR: &str = "CARGO_REGISTRY_TOKEN";
 
-/// Checks that `tag` names the version the workspace manifest declares.
+/// Checks that `tag` names the version the manifest declares.
 ///
 /// A leading `v` is stripped, because a Git tag conventionally carries one and the manifest
 /// cannot. Returns the version on success, so a caller that wants to report it does not
 /// read the manifest twice.
 ///
+/// The version is taken from `[workspace.package]` when there is one, and otherwise from
+/// the root package itself. Both shapes are ordinary — a workspace root can be a virtual
+/// manifest that only declares members, or a real crate that also happens to be the root —
+/// and reading only the first is the same class of mistake as the hand-written order this
+/// crate exists to replace: correct for the case it was written against, wrong for the
+/// next one, and quiet about it either way.
+///
 /// This is worth failing on rather than warning about: a tag that disagrees with the
-/// manifest publishes a version nobody asked for under a name that now lies about what
-/// it contains, and crates.io does not allow it to be taken back.
+/// manifest publishes a version nobody asked for under a name that then lies about what it
+/// contains, and crates.io does not allow that to be taken back.
 pub fn check_tag(root: &Path, tag: &str) -> Result<String> {
     let path = manifest_path(root);
     let manifest = Manifest::read(&path)?;
 
-    let version = manifest
+    let inherited = manifest
         .workspace
         .as_ref()
         .and_then(|w| w.package.as_ref())
-        .and_then(|p| p.version.clone())
-        .ok_or_else(|| {
-            Error::manifest(
-                &path,
-                "has no [workspace.package] version to compare the tag against",
-            )
-        })?;
+        .and_then(|p| p.version.clone());
+    let literal = manifest
+        .package
+        .as_ref()
+        .and_then(|p| p.version.as_ref())
+        .and_then(|v| v.value().cloned());
+
+    // A literal on the root package wins over the inherited one. A manifest cannot
+    // meaningfully state both, so the only thing that matters is not silently ignoring one.
+    let version = literal.or(inherited).ok_or_else(|| {
+        Error::manifest(
+            &path,
+            "declares no version to compare the tag against: expected a `version` in \
+             [package], or one in [workspace.package] for members to inherit",
+        )
+    })?;
 
     let tag_version = tag.strip_prefix('v').unwrap_or(tag);
     if tag_version != version {
         return Err(Error::Preflight(format!(
-            "tag {tag:?} does not match workspace version {version:?}.\n\
+            "tag {tag:?} does not match the manifest version {version:?}.\n\
              The tag names the release and the manifest names what it contains, so they have\n\
-             to agree: bump [workspace.package] version and the version keys in\n\
-             [workspace.dependencies] together, or move the tag."
+             to agree: bump the version (`[workspace.package]` and the `[workspace.dependencies]`\n\
+             keys together, if this is a workspace) or move the tag."
         )));
     }
 
@@ -103,6 +119,16 @@ mod tests {
         dir
     }
 
+    /// A crate that is its own workspace root, with a literal version.
+    ///
+    /// The other ordinary shape, and the one this crate itself has: no virtual manifest, no
+    /// `[workspace.package]`, just a package whose version the tag has to match.
+    fn standalone(manifest: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), manifest).unwrap();
+        dir
+    }
+
     #[test]
     fn a_matching_tag_passes_and_reports_the_version() {
         let dir = workspace("0.0.5");
@@ -132,15 +158,22 @@ mod tests {
     }
 
     #[test]
-    fn a_workspace_without_a_version_is_an_error_rather_than_a_pass() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("Cargo.toml"),
-            "[workspace]\nmembers = [\"crates/*\"]\n",
-        )
-        .unwrap();
+    fn a_standalone_crate_is_checked_against_its_own_version() {
+        // The regression: only `[workspace.package] version` used to be read, so a crate
+        // that is its own workspace root could not have its tag checked at all.
+        let dir = standalone(
+            "[workspace]\nmembers = [\".\"]\n\n[package]\nname = \"solo\"\nversion = \"0.3.1\"\n",
+        );
+        assert_eq!(check_tag(dir.path(), "v0.3.1").unwrap(), "0.3.1");
+        assert!(check_tag(dir.path(), "v0.3.0").is_err());
+    }
+
+    #[test]
+    fn a_manifest_with_no_version_at_all_is_an_error_rather_than_a_pass() {
+        let dir = standalone("[workspace]\nmembers = [\"crates/*\"]\n");
         let err = check_tag(dir.path(), "1.0.0").unwrap_err().to_string();
         assert!(err.contains("[workspace.package]"), "{err}");
+        assert!(err.contains("[package]"), "{err}");
     }
 
     #[test]

@@ -1,0 +1,122 @@
+name: Checks
+
+# The checks a release has to pass. This file has no trigger of its own: the
+# only way to run it is to call it, from release.yaml.
+#
+# That is what makes "do not publish until everything passes" structural rather
+# than a matter of timing. `workflow_run` could also make two separate workflows
+# wait for one another, but it runs in a *second* run, from the copy of the file
+# on the default branch, and the tag would have to be plumbed through by hand.
+# As a reusable workflow this is just `needs:` inside one run.
+on:
+  workflow_call:
+
+# Read-only: nothing here needs to write anything back.
+permissions:
+  contents: read
+
+# Declared here as well as in the caller: a workflow's own `env` is not passed
+# on to a workflow it calls.
+env:
+  CARGO_TERM_COLOR: always
+  # Fail any build script or rustc invocation that emits a warning we asked for.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    # All three platforms, because the part of this crate most likely to break on
+    # one of them is the part that reads the filesystem. `workspace.rs` turns a
+    # `Path` into the `&str` that `glob` matches against, and it normalises `\` to
+    # `/` to do it; a glob that matches on Linux and not on Windows is a release
+    # that only fails on somebody else's machine.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # rust-toolchain.toml is not used on purpose: the MSRV in Cargo.toml
+      # (`rust-version`) is what consumers are promised, so it is checked
+      # separately below rather than being the default toolchain.
+      - name: Install stable toolchain
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      # A cache saved by an earlier run carries the `target/package/` tree that
+      # `cargo package` leaves behind, and the cache action's post-job cleanup
+      # then fails on it with `ENOENT ... opendir .../package`. Dropping the tree
+      # here means the cache saved by this run no longer has it.
+      - name: Drop a stale packaged tree from the cache
+        shell: bash
+        run: |
+          rm -rf target/package
+          test ! -e target/package
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Docs
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --locked
+
+      # `cargo package` verifies the crate by extracting and rebuilding it under
+      # `<target>/package/`. The cache action walks `target/` again in its
+      # post-job cleanup and trips over that tree, which is noise on an otherwise
+      # green job. A target directory of its own keeps the cached `target/` clear
+      # of it -- and keeps the verify build out of the cache, where it has no use.
+      #
+      # Run on every platform rather than Linux alone: unlike a pure library, this
+      # one's published artefact is a binary, and packaging is the step that would
+      # notice a file the manifest fails to include.
+      - name: Package
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/package-target
+        run: cargo package --locked
+
+  # ---------------------------------------------------------------------------
+  # MSRV. `rust-version = "1.75"` is a promise; without this job it is only a
+  # claim in a manifest.
+  # ---------------------------------------------------------------------------
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Read rust-version from the manifest
+        id: msrv
+        run: |
+          set -euo pipefail
+          version=$(python3 -c '
+          import tomllib
+          with open("Cargo.toml", "rb") as f:
+              print(tomllib.load(f)["package"]["rust-version"])')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "MSRV is $version"
+
+      - name: Install MSRV toolchain
+        run: |
+          rustup toolchain install "${{ steps.msrv.outputs.version }}" --profile minimal
+          rustup default "${{ steps.msrv.outputs.version }}"
+
+      # --locked because the committed lockfile is what CI should resolve: a
+      # dependency that needs a newer compiler has to be caught here, not by a
+      # user on the MSRV.
+      - name: Build on MSRV
+        run: cargo build --all-targets --locked
