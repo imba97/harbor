@@ -2,7 +2,6 @@
 
 [![crates.io](https://img.shields.io/crates/v/harbor?style=flat-square&logo=rust)](https://crates.io/crates/harbor)
 [![docs.rs](https://img.shields.io/docsrs/harbor?style=flat-square&logo=docs.rs)](https://docs.rs/harbor)
-[![CI](https://img.shields.io/github/actions/workflow/status/imba97/harbor/ci.yaml?style=flat-square&logo=github)](https://github.com/imba97/harbor/actions/workflows/ci.yaml)
 [![MSRV](https://img.shields.io/badge/MSRV-1.75-blue?style=flat-square)](https://blog.rust-lang.org/2023/12/28/Rust-1.75.0.html)
 [![licence](https://img.shields.io/crates/l/harbor?style=flat-square)](#licence)
 

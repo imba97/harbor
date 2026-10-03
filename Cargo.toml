@@ -38,9 +38,19 @@ name = "cargo-harbor"
 path = "src/main.rs"
 
 [dependencies]
-# `clap` for the CLI only. The library takes plain arguments, so a dependent is not
-# forced to share this choice.
-clap = { version = "4", features = ["derive"] }
+# `clap` for the CLI only. The library takes plain arguments, so a dependent is not forced
+# to share this choice.
+#
+# ⚠️ The patch bound is not decoration: `clap` 4.6.0 raised its MSRV to 1.85, so a plain
+# `"4"` resolves to a version this crate's `rust-version` cannot build — which the MSRV job
+# then reports as a parse failure inside `clap_derive`, a long way from the requirement that
+# caused it. 4.5.61 is the last release on Rust 1.74.
+#
+# The same applies to `clap_lex`, which `clap_builder` accepts as `^1.0.0`: 1.1.0 raised its
+# MSRV too. Our lockfile pins 1.0.1, and `--locked` is what CI builds with, but a fresh
+# resolution would otherwise pick 1.1.x. Cargo has no way to express "oldest MSRV wins", so
+# the bound here plus the MSRV job in CI is the whole defence.
+clap = { version = "~4.5.61", features = ["derive"] }
 # Member patterns are real globs (`crates/*`, and Cargo allows `**`), so they are matched
 # by a glob crate rather than by string surgery that would quietly disagree with Cargo.
 glob = "0.3"
@@ -49,7 +59,10 @@ toml = "0.8"
 thiserror = "2"
 
 [dev-dependencies]
-tempfile = "3"
+# ⚠️ Bounded for the same reason as `clap` above: `tempfile` 3.25.0 widened its `getrandom`
+# requirement to `>=0.3.0, <0.5`, which resolves to 0.4.x — a release that needs edition
+# 2024 and therefore Cargo 1.85. 3.24.0 is the last one pinned to `getrandom ^0.3.0`.
+tempfile = "~3.24.0"
 
 [profile.release]
 lto = "thin"
