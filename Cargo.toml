@@ -17,7 +17,7 @@ members = ["."]
 # `cargo harbor`. That is the one place Cargo's convention overrides the nicer name.
 [package]
 name = "harbor"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 rust-version = "1.75"
 description = "Release orchestration for Cargo workspaces: compute what publishes in what order, preflight a tag, and drive the registry."
