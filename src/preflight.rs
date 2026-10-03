@@ -63,11 +63,15 @@ pub fn check_tag(root: &Path, tag: &str) -> Result<String> {
 
     let tag_version = tag.strip_prefix('v').unwrap_or(tag);
     if tag_version != version {
+        // The fix is named without assuming where the version lives. A single package keeps
+        // it in `[package]`; a workspace keeps it in `[workspace.package]` and inherits it.
+        // Telling a single-package crate to edit keys it does not have sends the reader
+        // looking for something that is not there.
         return Err(Error::Preflight(format!(
             "tag {tag:?} does not match the manifest version {version:?}.\n\
              The tag names the release and the manifest names what it contains, so they have\n\
-             to agree: bump the version (`[workspace.package]` and the `[workspace.dependencies]`\n\
-             keys together, if this is a workspace) or move the tag."
+             to agree. Bump the version in Cargo.toml — `[workspace.package]` and the\n\
+             `[workspace.dependencies]` keys together, if this is a workspace — or move the tag."
         )));
     }
 
@@ -161,11 +165,21 @@ mod tests {
     fn a_standalone_crate_is_checked_against_its_own_version() {
         // The regression: only `[workspace.package] version` used to be read, so a crate
         // that is its own workspace root could not have its tag checked at all.
-        let dir = standalone(
-            "[workspace]\nmembers = [\".\"]\n\n[package]\nname = \"solo\"\nversion = \"0.3.1\"\n",
-        );
+        let dir = standalone("[package]\nname = \"solo\"\nversion = \"0.3.1\"\n");
         assert_eq!(check_tag(dir.path(), "v0.3.1").unwrap(), "0.3.1");
         assert!(check_tag(dir.path(), "v0.3.0").is_err());
+    }
+
+    #[test]
+    fn a_mismatch_on_a_standalone_crate_does_not_point_at_workspace_keys() {
+        // A single package has no `[workspace.package]` and no `[workspace.dependencies]`.
+        // Naming them sends the reader looking for tables that are not in the file, so the
+        // advice has to work for both shapes.
+        let dir = standalone("[package]\nname = \"solo\"\nversion = \"0.3.1\"\n");
+        let err = check_tag(dir.path(), "v0.3.0").unwrap_err().to_string();
+        assert!(err.contains("Cargo.toml"), "{err}");
+        assert!(err.contains("if this is a workspace"), "{err}");
+        assert!(err.contains("or move the tag"), "{err}");
     }
 
     #[test]

@@ -222,12 +222,15 @@ impl Manifest {
             None => None,
         }
         .ok_or_else(|| {
+            // Names both places a version can come from, because either shape reaches here:
+            // a single package states its own, and a member of a workspace inherits one.
             Error::manifest(
                 manifest_path,
                 format!(
-                    "{name} has no version, and does not inherit one from the workspace.\n\
-                     Either give it a literal `version`, or add `version` to the root's\n\
-                     [workspace.package] table for `version.workspace = true` to resolve against."
+                    "{name} has no version, and inherits none from a workspace.\n\
+                     Give it a literal `version`, or — if it is a member of a workspace — add\n\
+                     one to the root's [workspace.package] table so `version.workspace = true`\n\
+                     has something to resolve against."
                 ),
             )
         })?;
@@ -341,7 +344,7 @@ version.workspace = true
 "#,
         );
         let err = m.to_crate(&PathBuf::from("t"), None, None).unwrap_err();
-        assert!(err.to_string().contains("does not inherit"), "{err}");
+        assert!(err.to_string().contains("inherits none"), "{err}");
     }
 
     #[test]
