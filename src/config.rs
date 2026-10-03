@@ -59,6 +59,30 @@ pub struct ReleaseConfig {
     /// Set this when one workspace holds several families of crates and only one family
     /// belongs to a given release.
     pub crate_prefix: String,
+    /// Exactly which crates this release is about, and nothing else.
+    ///
+    /// `None` by default, which means "derive it": every crate the manifest rules include,
+    /// ordered by the dependency graph. That is the right answer for a workspace where the
+    /// crates are all part of one product.
+    ///
+    /// `Some` is for the case the derived answer gets wrong, and there is one close to home:
+    /// a tool that ships as an installed binary declares `publish = false` — correctly, it
+    /// has no business being anybody's dependency — and then cannot publish *itself* through
+    /// this crate, because `respect_publish_flag` is exactly what makes `publish = false`
+    /// mean anything. Nor can the flag simply be turned off: that would publish every crate
+    /// the workspace holds, which is a different release.
+    ///
+    /// Listing the crates explicitly resolves that without weakening anything:
+    ///
+    /// - the flag keeps its meaning, because nothing ignores it;
+    /// - the release says what it is about instead of inferring it, so a crate that should
+    ///   not ship cannot be swept in by a manifest change elsewhere;
+    /// - ordering still has to be explicit — every crate in the list must come after the
+    ///   dependencies it needs, which is checked against the graph rather than trusted.
+    ///
+    /// It is not a way to publish something out of order. The list selects and orders; the
+    /// graph still has the final say on whether that order can work.
+    pub explicit_order: Option<Vec<String>>,
 }
 
 impl Default for ReleaseConfig {
@@ -70,6 +94,7 @@ impl Default for ReleaseConfig {
             retry_delay: Duration::from_secs(DEFAULT_RETRY_DELAY_SECS),
             max_attempts: DEFAULT_MAX_ATTEMPTS,
             crate_prefix: String::new(),
+            explicit_order: None,
         }
     }
 }
@@ -88,9 +113,16 @@ impl ReleaseConfig {
     /// Whether `krate` is part of this release.
     ///
     /// The single place that answers "does this crate ship", so the plan, the order and the
-    /// exclusion report cannot disagree — which is the failure mode that made this flag
-    /// worth wiring up properly rather than leaving as a field nobody read.
+    /// exclusion report cannot disagree — which is the failure mode that made
+    /// `respect_publish_flag` worth wiring up properly rather than leaving as a field
+    /// nobody read.
+    ///
+    /// When [`ReleaseConfig::explicit_order`] is set, that list is the answer: it names
+    /// exactly what this release is about, and nothing else is a candidate.
     pub fn includes(&self, krate: &Crate) -> bool {
+        if let Some(names) = &self.explicit_order {
+            return names.iter().any(|n| n == &krate.name);
+        }
         !self.respect_publish_flag || krate.is_publishable()
     }
 

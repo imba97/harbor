@@ -1,57 +1,35 @@
 # harbor
 
-Release orchestration for a Cargo workspace: work out what publishes in what order, check
-a release before it starts, and drive the registry.
+[![crates.io](https://img.shields.io/crates/v/harbor?style=flat-square&logo=rust)](https://crates.io/crates/harbor)
+[![docs.rs](https://img.shields.io/docsrs/harbor?style=flat-square&logo=docs.rs)](https://docs.rs/harbor)
+[![CI](https://img.shields.io/github/actions/workflow/status/imba97/harbor/ci.yaml?style=flat-square&logo=github)](https://github.com/imba97/harbor/actions/workflows/ci.yaml)
+[![MSRV](https://img.shields.io/badge/MSRV-1.75-blue?style=flat-square)](https://blog.rust-lang.org/2023/12/28/Rust-1.75.0.html)
+[![licence](https://img.shields.io/crates/l/harbor?style=flat-square)](#licence)
 
-`harbor` is a library first and a command second. The command is a thin shell over the
-library, so everything a release decides is testable without a registry, a token, or a CI
-run — which is the point, because the decisions are where releases go wrong.
+**Release orchestration for a Cargo workspace.** Work out what publishes in what order,
+check a release before it starts, and drive the registry.
 
-## Why it exists
+[中文文档](README_CN.md)
 
-Publishing a workspace has one correct shape and several ways to get it silently wrong:
+## Features
 
-- **A crate cannot be published before its dependencies.** `cargo publish` resolves each
-  dependency against the *live* registry, so the order is a topological sort of the
-  dependency graph. A hand-maintained copy of that order is a bug waiting to happen: the
-  project this was extracted from had one, it listed a crate before something it depended
-  on, and the publish loop retried the impossible dependency for ten minutes before
-  reporting a problem with the registry index. Nothing in that failure pointed at the list.
-- **Which crates ship is a property of each crate.** `publish = false` in the crate's own
-  manifest, not a list of exceptions beside a workflow that drifts out of step with it.
-- **A partial release is normal.** crates.io never allows a re-upload, so a re-run has to
-  recognise what is already there and continue.
-- **An index that has not caught up is a matter of time; a bad token is not.** Retrying both
-  wastes ten minutes to produce the same failure, so only one of them is retried.
+- 🧮 **Derived order** — topological sort of the dependency graph, nothing to keep in sync
+- 🛑 **Preflight** — cycles, `publish = false` clashes and broken `members` fail before any
+  upload
+- 🏷️ **Tag check** — tag against manifest version; missing token told apart from empty
+- 🔁 **Resumable** — a version already on the registry counts as done, so a re-run finishes a
+  partial release
+- ⏱️ **Retries that matter** — an unindexed dependency is waited for, a bad token is not
+- 🧪 **Testable** — every decision goes through a `CommandRunner`, no registry needed
+- 📚 **Library first** — the CLI is a thin shell over a public API
 
-## Using the library
+## Install
 
-```rust
-use harbor::{Release, ReleaseConfig};
-
-fn main() -> Result<(), harbor::Error> {
-    // Every crate in the workspace is a candidate by default. `crate_prefix` narrows that
-    // when one workspace holds several families of crates.
-    let release = Release::new(".").with_config(ReleaseConfig::default());
-
-    let plan = release.plan()?; // reads the workspace, nothing else
-    for krate in &plan.order {
-        println!("{} {}", krate.name, krate.version);
-    }
-
-    let report = release.publish()?; // uploads, in that order
-    println!("{} published", report.published.len());
-    Ok(())
-}
+```console
+$ cargo install harbor --locked        # the `cargo harbor` subcommand
 ```
 
-`Publisher::with_runner` takes a `CommandRunner`, so the whole publishing policy — the
-order, re-run behaviour, retry budget, and the exact commands issued — can be exercised
-from a test with no registry involved.
-
-## Using the command
-
-The binary is named `cargo-harbor`, so Cargo finds it as a subcommand:
+## Command
 
 ```console
 $ cargo harbor plan
@@ -71,79 +49,81 @@ $ cargo harbor publish                # upload, in that order
 $ cargo harbor publish --dry-run      # say what would happen
 ```
 
-`check --plan` is worth its own line: computing the plan is offline and free, and it is the
-only thing that catches a dependency cycle, a published crate that depends on an excluded
-one, or a `members` pattern that matches nothing — all of which would otherwise surface half
-way through a release. The preflight runs before anything is uploaded either way; `--plan`
-is for the case where you want the *whole* question answered before the tag is pushed.
-
-That order is a topological sort: `acme-core` and `acme-macros` depend on nothing, so they
-go first (in name order, because ties are broken by name to keep the output stable);
-`acme-net` and `acme-cli-lib` wait for those; `acme-app` waits for everything. Nothing is
-configured — it falls out of the manifests.
+That order is nothing but the dependency graph: `acme-core` and `acme-macros` depend on
+nothing so they go first (in name order, so the output is stable), `acme-app` waits for
+everything. `--plan` is worth using in CI — computing the plan is offline and free, and it is
+the only step that catches a cycle or a broken `members` pattern.
 
 | Option | Meaning |
 | --- | --- |
 | `--root <dir>` | Workspace root (default `.`) |
+| `--order <crate>` | Publish exactly these crates, in this order (repeatable, comma-separated) |
 | `--prefix <p>` | Only crates starting with `p` are candidates (default: no filter) |
-| `--no-locked` | Allow the release to change the lockfile. Off by default |
+| `--no-locked` | Allow the release to change the lockfile (default: refuse) |
 | `--wait <s>` | Delay between index-propagation retries (default 10) |
 | `--attempts <n>` | Retry budget for index propagation (default 60) |
-| `check --plan` | Also compute the plan, so an unpublishable workspace fails at `check` |
+| `check --plan` | Also compute the plan |
+| `publish --dry-run` | Print what would happen, upload nothing |
 
-## What it deliberately does not do
+## Library
 
-No version bumping, no changelog generation, no git tags, no binary packaging. Those are
-decisions a project makes for itself. This crate answers one question — what publishes, in
-what order, and did it work — and answers it well enough to run unattended.
+```rust
+use harbor::{Release, ReleaseConfig};
+
+let release = Release::new(".").with_config(ReleaseConfig::default());
+
+for krate in &release.plan()?.order {
+    println!("{} {}", krate.name, krate.version);
+}
+
+let report = release.publish()?;
+println!("{} published", report.published.len());
+```
+
+`Publisher::with_runner` takes a `CommandRunner`, which is what makes a release testable
+without a registry.
 
 ## In CI
 
 ```yaml
-- name: Install the release tool
-  # Once harbor is on crates.io; use `cargo install --path <checkout>` to build it from a
-  # local copy instead.
-  run: cargo install harbor --locked
+- run: cargo install harbor --locked
 
-- name: Check the tag names this version
-  if: github.event_name == 'push'
-  run: cargo harbor check "$GITHUB_REF_NAME"
+- name: Publish
+  run: |
+    # The tag check only makes sense on a tag; `publish` is safe to run anywhere because it
+    # fails before uploading if the plan cannot be computed.
+    if [ "$GITHUB_REF_TYPE" = "tag" ]; then cargo harbor check --plan "$GITHUB_REF_NAME"; fi
+    cargo harbor publish
   env:
-    CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-- name: Publish in dependency order
-  run: cargo harbor publish
-  env:
-    # The token is read from the environment, never from an argument list: a token on a
-    # command line is visible to every process on the machine, and one in a log is leaked
-    # to everyone who can read the run.
+    # Read from the environment, never from an argument list: a token on a command line is
+    # visible to every process on the machine.
     CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 ```
 
-### How this repository releases itself
+See [`.github/workflows/`](.github/workflows/) for how this repository releases itself.
 
-`.github/workflows/ci.yaml` is a reusable workflow — it has no trigger of its own and can
-only be called — and `release.yaml` calls it, so "do not publish until everything passes" is
-`needs:` rather than a matter of timing. Tag pushes (`v*.*.*`) are the only trigger.
+## `--order`, when the derivation is wrong
 
-The publish job builds this crate from the tagged commit and uses it for its own preflight,
-which makes the release a real exercise of the tool. It then publishes with `cargo publish`
-rather than `harbor publish`, and that is deliberate: this crate's manifest sets
-`publish = false` — correct for a tool that is installed with `cargo install` and has no
-business being a dependency — and `harbor publish` honours that flag, so it would refuse to
-publish itself. The same flag is why there is no `harbor plan` step there: a plan for a
-workspace whose only crate is excluded is an empty plan, which proves nothing.
+By default the release is derived from the manifests, which needs no configuration — even
+for a workspace of one.
 
-## Testing
+Use `--order` when a crate should ship but its manifest says `publish = false`, a combination
+that happens for real: a tool installed as a binary declares the flag so nothing can make it
+a dependency, and that same flag stops it releasing itself. Turning the flag off instead
+would publish every other crate in the workspace.
 
 ```console
-$ cargo test
+$ cargo harbor --order some-tool publish
 ```
 
-No network, no token, no registry. The unit tests cover the graph, the ordering, the
-manifest reading (including the two spellings of an inherited version), the outcome
-classification against output recorded from real `cargo publish` failures, and the whole
-publish policy through a fake runner.
+`--order` selects and sequences, but it does not override the graph: naming a crate before
+something it depends on is refused, not obeyed. Names are *package* names, not binary names —
+the package is `some-tool`, its binary is `cargo-some-tool`.
+
+## What it does not do
+
+No version bumping, no changelog, no git tags, no binary packaging. Those are decisions a
+project makes for itself.
 
 ## Licence
 

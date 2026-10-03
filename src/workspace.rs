@@ -4,6 +4,7 @@
 //! be the same thing right up until a crate lives somewhere else — which is exactly what
 //! this crate's tests do — and then it would silently miss it.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -59,7 +60,15 @@ pub fn load(root: &Path, config: &ReleaseConfig) -> Result<Graph> {
         .and_then(|p| p.publish.as_ref())
         .map(crate::manifest::Publish::allows);
 
+    // Read every member first, then resolve dependencies against that set.
+    //
+    // The two passes matter because "is this dependency a crate in this workspace" cannot be
+    // answered by a name prefix. With an empty prefix — the default, and the right default —
+    // *every* name matches, so `clap` looks like a sibling crate and a release of a crate
+    // that has any dependency at all fails to even compute a plan. The set of members is the
+    // only honest answer, and it is not known until every manifest has been read.
     let mut graph = Graph::new();
+    let mut packages: Vec<(String, Vec<crate::graph::Dep>)> = Vec::new();
     for dir in member_dirs(root, workspace, &root_manifest_path)? {
         let path = manifest_path(&dir);
         let manifest = Manifest::read(&path)?;
@@ -79,7 +88,21 @@ pub fn load(root: &Path, config: &ReleaseConfig) -> Result<Graph> {
         let name = krate.name.clone();
         let deps = manifest.internal_deps(&config.crate_prefix);
         graph.insert(krate);
+        packages.push((name, deps));
+    }
+
+    // Owned names, because the set is consulted while the graph is being mutated: a
+    // `&str` borrowed from `graph` cannot outlive an `add_dep` that needs it mutably.
+    let members: BTreeSet<String> = graph.crates().map(|c| c.name.clone()).collect();
+    for (name, deps) in packages {
         for dep in deps {
+            if !members.contains(&dep.name) {
+                // External. `internal_deps` matched it on the prefix, which is a filter and
+                // not a membership test; a workspace with no shared prefix necessarily
+                // brings its whole dependency tree through here, and none of it belongs on
+                // a dependency edge.
+                continue;
+            }
             graph.add_dep(&name, dep);
         }
     }

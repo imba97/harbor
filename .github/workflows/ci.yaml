@@ -1,15 +1,25 @@
 name: Checks
 
-# The checks a release has to pass. This file has no trigger of its own: the
-# only way to run it is to call it, from release.yaml.
+# Runs on every push and pull request, and is also called by release.yaml.
 #
-# That is what makes "do not publish until everything passes" structural rather
-# than a matter of timing. `workflow_run` could also make two separate workflows
-# wait for one another, but it runs in a *second* run, from the copy of the file
-# on the default branch, and the tag would have to be plumbed through by hand.
-# As a reusable workflow this is just `needs:` inside one run.
+# It has to be both. As a reusable workflow alone (`workflow_call` only) it would run exactly
+# once per release, which means a broken build is discovered while publishing rather than
+# when it was pushed -- and a status badge for it would never show anything. Running it on
+# pushes and pull requests gives the badge its meaning and makes "do not publish until
+# everything passes" a statement about checks that have already been running.
+#
+# The release side still works through `workflow_call`: release.yaml calls this file, so
+# publish waits for every job in it, matrix included, without listing them.
 on:
+  push:
+  pull_request:
   workflow_call:
+
+# A second push to the same branch makes the first run pointless, and this workflow takes
+# minutes on a three-platform matrix.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 # Read-only: nothing here needs to write anything back.
 permissions:

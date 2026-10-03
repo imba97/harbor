@@ -115,7 +115,16 @@ impl Graph {
     /// Both of these fail *late* otherwise — at publish time, with a message about the
     /// dependency rather than about the crate that is wrong — which is exactly the shape
     /// of failure this crate exists to remove.
+    ///
+    /// With [`ReleaseConfig::explicit_order`] set, the dependencies of the listed crates are
+    /// deliberately *not* required to be in the release. That list is a statement that those
+    /// crates are somebody else's to publish — a workspace sharing crates with a sibling
+    /// release, or a crate that is published separately on its own schedule. Ordering within
+    /// the list is still enforced by [`Graph::publish_order`].
     pub fn validate(&self, config: &ReleaseConfig) -> Result<()> {
+        if config.explicit_order.is_some() {
+            return Ok(());
+        }
         for krate in self.crates() {
             if !config.includes(krate) {
                 continue;
@@ -181,7 +190,16 @@ impl Graph {
     ///
     /// A topological sort by Kahn's algorithm, with ties broken by name so the output is
     /// stable across runs.
+    ///
+    /// When [`ReleaseConfig::explicit_order`] is set, that list is used instead — but only
+    /// after being checked against the graph. An explicit order selects *which* crates ship
+    /// and states their sequence; it does not get to be wrong about dependencies, so a list
+    /// that names a crate before something it depends on is rejected rather than obeyed.
     pub fn publish_order(&self, config: &ReleaseConfig) -> Result<Vec<String>> {
+        if let Some(names) = &config.explicit_order {
+            return self.explicit_order(names);
+        }
+
         let published: BTreeSet<&str> = self
             .crates
             .values()
@@ -242,6 +260,64 @@ impl Graph {
         }
 
         Ok(order)
+    }
+
+    /// Uses an explicitly listed order, after checking it against the graph.
+    ///
+    /// Three things can be wrong with such a list, and each gets its own message because
+    /// each has a different fix:
+    ///
+    /// - it names a crate this workspace does not have (a typo, or a crate that moved);
+    /// - it repeats one;
+    /// - it puts a crate before something it depends on, which the registry cannot satisfy
+    ///   no matter how deliberate the list looks.
+    fn explicit_order(&self, names: &[String]) -> Result<Vec<String>> {
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for name in names {
+            if self.get(name).is_none() {
+                return Err(Error::Workspace(format!(
+                    "the explicit order names {name:?}, which is not a package in this \
+                     workspace.\n\
+                     Use the *package* name rather than the binary name: a subcommand \
+                     plugin's package is `foo` while its binary is `cargo-foo`.\n\
+                     Check the spelling against `cargo metadata --no-deps`."
+                )));
+            }
+            if !seen.insert(name.as_str()) {
+                return Err(Error::Workspace(format!(
+                    "the explicit order names {name:?} more than once. A crate is published \
+                     once per release, so a repeat is a mistake in the list rather than two \
+                     publishes."
+                )));
+            }
+        }
+
+        // The graph still has the last word. This is what keeps an explicit order a
+        // selection rather than an override: it can say *which* crates, and in what
+        // sequence, but not that a dependency may come later than its dependent.
+        for (index, name) in names.iter().enumerate() {
+            for dep in self.deps_of(name) {
+                if !seen.contains(dep.name.as_str()) {
+                    // Depends on something outside the list entirely: that crate is not
+                    // being published, so `validate` is where it belongs.
+                    continue;
+                }
+                let position = names
+                    .iter()
+                    .position(|n| n == &dep.name)
+                    .expect("a name in `seen` came from `names`");
+                if position > index {
+                    return Err(Error::Workspace(format!(
+                        "the explicit order publishes {name} before {} (position {}), which it \
+                         depends on.\nThe registry cannot satisfy that. Swap them.",
+                        dep.name,
+                        position + 1
+                    )));
+                }
+            }
+        }
+
+        Ok(names.to_vec())
     }
 }
 
@@ -539,5 +615,108 @@ mod tests {
         let excluded = plan.excluded();
         assert_eq!(excluded.len(), 1);
         assert_eq!(excluded[0].name, "acme-cli");
+    }
+
+    /// A configuration that names exactly one crate, whatever the manifests say.
+    fn only(names: &[&str]) -> ReleaseConfig {
+        ReleaseConfig {
+            explicit_order: Some(names.iter().map(|n| (*n).to_string()).collect()),
+            ..config()
+        }
+    }
+
+    #[test]
+    fn an_explicit_order_publishes_a_crate_that_sets_publish_false() {
+        // The case this exists for: a tool that ships as an installed binary declares
+        // `publish = false`, correctly, and then has to be able to release itself.
+        let g = graph(&[("acme-tool", false)], &[]);
+        let config = only(&["acme-tool"]);
+
+        assert!(config.includes(g.get("acme-tool").unwrap()));
+        assert_eq!(g.publish_order(&config).unwrap(), vec!["acme-tool"]);
+        g.validate(&config).unwrap();
+    }
+
+    #[test]
+    fn an_explicit_order_selects_and_excludes_everything_else() {
+        let g = graph(&[("acme-a", true), ("acme-b", true), ("acme-c", true)], &[]);
+        let config = only(&["acme-b"]);
+        assert_eq!(g.publish_order(&config).unwrap(), vec!["acme-b"]);
+        assert!(!config.includes(g.get("acme-a").unwrap()));
+    }
+
+    #[test]
+    fn an_explicit_order_still_has_to_respect_dependencies() {
+        // The point of checking: an explicit list selects and sequences, but it does not get
+        // to be wrong about the graph.
+        let g = graph(
+            &[("acme-map", true), ("acme-object", true)],
+            &[("acme-object", "acme-map")],
+        );
+        let err = g
+            .publish_order(&only(&["acme-object", "acme-map"]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("acme-object"), "{err}");
+        assert!(err.contains("depends on"), "{err}");
+        assert!(err.contains("Swap them"), "{err}");
+    }
+
+    #[test]
+    fn a_correct_explicit_order_is_accepted() {
+        let g = graph(
+            &[("acme-map", true), ("acme-object", true)],
+            &[("acme-object", "acme-map")],
+        );
+        let order = g
+            .publish_order(&only(&["acme-map", "acme-object"]))
+            .unwrap();
+        assert_eq!(order, vec!["acme-map", "acme-object"]);
+    }
+
+    #[test]
+    fn an_explicit_order_naming_a_crate_that_does_not_exist_is_rejected() {
+        let g = graph(&[("acme-a", true)], &[]);
+        let err = g
+            .publish_order(&only(&["acme-typo"]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("acme-typo"), "{err}");
+        assert!(err.contains("not a package in this workspace"), "{err}");
+        assert!(err.contains("binary name"), "{err}");
+    }
+
+    #[test]
+    fn an_explicit_order_naming_a_crate_twice_is_rejected() {
+        let g = graph(&[("acme-a", true)], &[]);
+        let err = g
+            .publish_order(&only(&["acme-a", "acme-a"]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("more than once"), "{err}");
+    }
+
+    #[test]
+    fn an_explicit_order_may_leave_a_dependency_to_someone_else() {
+        // A workspace can share crates with a sibling release. Naming only the dependent is
+        // a statement that the dependency is not this release's business -- so `validate`
+        // must not complain that it is unpublished, which is what it does when the order is
+        // derived.
+        let g = graph(
+            &[("acme-core", false), ("acme-app", true)],
+            &[("acme-app", "acme-core")],
+        );
+        assert!(
+            g.validate(&config()).is_err(),
+            "the derived order rejects it"
+        );
+        assert!(
+            g.validate(&only(&["acme-app"])).is_ok(),
+            "an explicit order allows it"
+        );
+        assert_eq!(
+            g.publish_order(&only(&["acme-app"])).unwrap(),
+            vec!["acme-app"]
+        );
     }
 }

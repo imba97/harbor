@@ -6,8 +6,11 @@ name: Release
 # failure because publishing a version that is already on the registry counts as
 # done rather than as an error.
 #
-# The checks live in ci.yaml, which this workflow calls. Keeping them in one run
-# is what makes the order structural.
+# The checks live in ci.yaml, which this workflow calls, so "do not publish until
+# everything passes" is `needs:` inside one run rather than a matter of timing.
+# `workflow_run` would also make two workflows wait for one another, but it runs in
+# a *second* run, from the copy of the file on the default branch, and the tag
+# would have to be plumbed through by hand.
 
 on:
   push:
@@ -31,20 +34,18 @@ jobs:
     uses: ./.github/workflows/ci.yaml
 
   # ---------------------------------------------------------------------------
-  # crates.io. One crate, so there is no dependency order to respect and no index
+  # crates.io. One package, so there is no dependency order to respect and no index
   # propagation to wait for.
   #
-  # ⚠️ This job publishes with `cargo publish` rather than with `harbor publish`,
-  # and that is not an oversight. `harbor`'s own manifest sets `publish = false` —
-  # which is the correct declaration for a tool that is installed with
-  # `cargo install` and has no business on the registry as a dependency — and
-  # `harbor publish` honours that flag, so it would refuse to publish itself. It is
-  # also the reason there is no `harbor plan` step here: a plan for a workspace
-  # whose only crate is excluded is an empty plan, which proves nothing.
+  # The job releases this crate with harbor itself, from the tagged commit, so the
+  # release is also the most complete test the tool gets: its preflight decides
+  # whether the release may start, and its publisher drives it.
   #
-  # What harbor *can* do for its own release is the preflight, and that is what it
-  # does below. That is also a genuine self-test: the command that decides whether
-  # a release may start is exercised by the release.
+  # No `--order` here, and that is the interesting part: `cargo harbor publish`
+  # derives what to publish from the manifests, and for a workspace of one that
+  # derivation is the whole answer. The flag exists for workspaces where it is not —
+  # see the README — but needing it here would mean this crate's own manifest was
+  # saying something the release had to work around.
   # ---------------------------------------------------------------------------
   publish:
     name: Publish to crates.io
@@ -64,6 +65,10 @@ jobs:
     env:
       # Named once, so every step below means the same thing by "the workspace".
       HARBOR_ROOT: ${{ github.workspace }}
+      # `cargo install` builds into its own temporary target directory by default, which
+      # would recompile the whole dependency tree from scratch. Pointing it at the
+      # workspace's target directory lets it start from what `cargo` has already built.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - uses: actions/checkout@v7
 
@@ -72,20 +77,29 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
 
-      # Built from the tagged commit rather than installed from crates.io: the
-      # point is for this release to be checked by *this* revision of harbor. A
-      # published version would test the previous release, which is the opposite
-      # of useful here.
+      # Installed from the tagged commit rather than from crates.io: the point is for this
+      # release to be checked and driven by *this* revision of harbor, and a published
+      # version would be the previous release, which is the opposite of useful here.
       #
-      # No `rust-cache` in this job on purpose. Restoring the test job's cache is
-      # what made the reference workflow report cleanup errors about a
-      # `target/package/` tree this job never created.
-      - name: Build the release tool from this commit
-        run: cargo build --release --locked --bin cargo-harbor
+      # `cargo install` puts the binary on `PATH`, which is the whole reason for doing it
+      # this way: `cargo-harbor` is only reachable as `cargo harbor` when cargo can find it,
+      # so every step below reads as the command a person would type. Building it with
+      # `cargo build` and calling `./target/release/cargo-harbor` works too, and was what
+      # this job used to do, but it means the workflow documents an invocation that users
+      # never perform -- and it hides the fact that the subcommand plumbing is what makes
+      # `cargo harbor` work at all.
+      #
+      # No `rust-cache` in this job on purpose. Restoring the test job's cache is what made
+      # the reference workflow report cleanup errors about a `target/package/` tree this job
+      # never created.
+      - name: Install the release tool from this commit
+        run: cargo install --path . --locked --bin cargo-harbor
 
-      # The preflight the release depends on, run by harbor itself. Two guards in
-      # one command: the tag names the version in the manifest, and a registry
-      # token is present. Doing nothing until both hold is the whole point.
+      # The preflight the release depends on, run by harbor itself. Three things in
+      # one command: the tag names the version in the manifest, a registry token is
+      # present, and the plan is computable at all -- the last of which is the only
+      # thing that catches a dependency cycle or a members pattern that matches
+      # nothing, both of which would otherwise surface half way through a release.
       #
       # The token is passed through the environment and never as an argument, so it
       # cannot reach a log by way of cargo echoing a command line. The tag is quoted
@@ -94,29 +108,16 @@ jobs:
       - name: Check the release before starting it
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: ./target/release/cargo-harbor --root "$HARBOR_ROOT" check "$GITHUB_REF_NAME"
+        run: cargo harbor --root "$HARBOR_ROOT" check --plan "$GITHUB_REF_NAME"
 
-      # `--locked` publishes exactly the dependency set CI tested, instead of
-      # quietly resolving a newer one at release time. There is no
-      # "is it already there?" probe before this: every probe available here lies
-      # (`cargo search` fuzzy-matches, `cargo info` resolves against the local
-      # workspace), so the publish error itself is the only trustworthy signal and
-      # it is what this branches on.
+      # Publishing is harbor's own job, and it does it here for itself.
+      #
+      # What it replaces is the shell this step used to be: the retry on a registry
+      # index that has not caught up, treating an already-uploaded version as done so a
+      # re-run after a partial release finishes the job, and stopping at once on
+      # anything else rather than spending the retry budget on a failure a retry cannot
+      # fix.
       - name: Publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          set -euo pipefail
-          if output=$(cargo publish --locked 2>&1); then
-            echo "$output"
-            echo "published"
-          elif grep -qi 'already uploaded\|already exists' <<<"$output"; then
-            # A re-run after a partial release lands here. crates.io never allows a
-            # re-upload, so the version being there already is done, not failed.
-            echo "$output"
-            echo "this version is already on the registry, nothing to do"
-          else
-            echo "$output"
-            echo "::error::publishing failed"
-            exit 1
-          fi
+        run: cargo harbor --root "$HARBOR_ROOT" publish
