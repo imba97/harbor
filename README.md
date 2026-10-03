@@ -15,7 +15,8 @@ check a release before it starts, and drive the registry.
 - 🧮 **Derived order** — topological sort of the dependency graph, nothing to keep in sync
 - 🛑 **Preflight** — cycles, `publish = false` clashes and broken `members` fail before any
   upload
-- 🏷️ **Tag check** — tag against manifest version; missing token told apart from empty
+- 🏷️ **Tag check** — the tag must name the manifest version, and the registry token must be
+  present and non-empty
 - 🔁 **Resumable** — a version already on the registry counts as done, so a re-run finishes a
   partial release
 - ⏱️ **Retries that matter** — an unindexed dependency is waited for, a bad token is not
@@ -50,19 +51,30 @@ $ cargo harbor publish --dry-run      # say what would happen
 
 That order is nothing but the dependency graph: `acme-core` and `acme-macros` depend on
 nothing so they go first (in name order, so the output is stable), `acme-app` waits for
-everything. `--plan` is worth using in CI — computing the plan is offline and free, and it is
-the only step that catches a cycle or a broken `members` pattern.
+everything.
+
+`--plan` is worth using in CI — computing the plan costs nothing and needs no network, and it
+is the step that catches a cycle or a broken `members` pattern before anything is uploaded.
+
+### Options
+
+Global:
 
 | Option | Meaning |
 | --- | --- |
 | `--root <dir>` | Workspace root (default `.`) |
-| `--order <crate>` | Publish exactly these crates, in this order (repeatable, comma-separated) |
-| `--prefix <p>` | Only crates starting with `p` are candidates (default: no filter) |
+| `--order <crate>` | Publish exactly these crates, in this order (repeatable, or comma-separated) |
+| `--prefix <p>` | Only consider crates whose name starts with `p` (default: no filter) |
 | `--no-locked` | Allow the release to change the lockfile (default: refuse) |
 | `--wait <s>` | Delay between index-propagation retries (default 10) |
 | `--attempts <n>` | Retry budget for index propagation (default 60) |
-| `check --plan` | Also compute the plan |
-| `publish --dry-run` | Print what would happen, upload nothing |
+
+Per subcommand: `check --plan`, `publish --dry-run`.
+
+`--order` is for the one case the derivation gets wrong: a crate that should ship but whose
+manifest sets `publish = false`. It selects and sequences, but it does not override the
+dependency graph — naming a crate before something it depends on is refused. Names are
+package names, so `harbor`, not `cargo-harbor`.
 
 ## Library
 
@@ -100,24 +112,6 @@ without a registry.
 ```
 
 See [`.github/workflows/`](.github/workflows/) for how this repository releases itself.
-
-## `--order`, when the derivation is wrong
-
-By default the release is derived from the manifests, which needs no configuration — even
-for a workspace of one.
-
-Use `--order` when a crate should ship but its manifest says `publish = false`, a combination
-that happens for real: a tool installed as a binary declares the flag so nothing can make it
-a dependency, and that same flag stops it releasing itself. Turning the flag off instead
-would publish every other crate in the workspace.
-
-```console
-$ cargo harbor --order some-tool publish
-```
-
-`--order` selects and sequences, but it does not override the graph: naming a crate before
-something it depends on is refused, not obeyed. Names are *package* names, not binary names —
-the package is `some-tool`, its binary is `cargo-some-tool`.
 
 ## What it does not do
 

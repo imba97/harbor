@@ -13,7 +13,7 @@
 
 - 🧮 **自动推导顺序** — 依赖图的拓扑排序，无需手工维护
 - 🛑 **发布前拦截** — 依赖成环、`publish = false` 冲突、`members` 写错，都在上传前失败
-- 🏷️ **Tag 校验** — 与 manifest 版本比对；并区分 token 缺失与 token 为空
+- 🏷️ **Tag 校验** — tag 必须与 manifest 版本一致，registry token 必须存在且非空
 - 🔁 **可续跑** — 已在 registry 上的版本视为完成，重跑即可接着做完一次中断的发布
 - ⏱️ **只重试该重试的** — 索引没跟上就等，token 不对就停
 - 🧪 **可测试** — 所有决策走 `CommandRunner`，不需要 registry
@@ -46,19 +46,29 @@ $ cargo harbor publish --dry-run      # 只打印将要发生什么
 ```
 
 那个顺序完全来自依赖图：`acme-core` 和 `acme-macros` 不依赖任何东西所以排最前（按名字排序，
-保证输出稳定），`acme-app` 等所有。**CI 里建议加上 `--plan`**——算计划是纯离线、零成本的，
-而它是唯一能发现依赖成环或 `members` 写错的步骤。
+保证输出稳定），`acme-app` 等所有。
+
+**CI 里建议加上 `--plan`**——算计划不花钱、不联网，它能在任何上传之前发现依赖成环或
+`members` 写错。
+
+### 选项
+
+全局：
 
 | 选项 | 含义 |
 | --- | --- |
 | `--root <dir>` | 工作区根目录（默认 `.`） |
 | `--order <crate>` | 只发布这些 crate、按这个顺序（可重复，或逗号分隔） |
-| `--prefix <p>` | 只把以 `p` 开头的 crate 作为候选（默认：不过滤） |
+| `--prefix <p>` | 只把名字以 `p` 开头的 crate 作为候选（默认：不过滤） |
 | `--no-locked` | 允许发布改动 lockfile（默认：拒绝） |
 | `--wait <s>` | 索引未跟上时的重试间隔秒数（默认 10） |
 | `--attempts <n>` | 索引未跟上时的重试次数（默认 60） |
-| `check --plan` | 额外计算发布计划 |
-| `publish --dry-run` | 只打印，不上传 |
+
+子命令自有：`check --plan`、`publish --dry-run`。
+
+`--order` 用于推导会出错的唯一情况：某个 crate 该发布、但 manifest 里是 `publish = false`。
+它只负责选择与排序，不覆盖依赖图——把 crate 排在其依赖之前会被拒绝。写的是 **package 名**，
+所以是 `harbor` 而不是 `cargo-harbor`。
 
 ## 作为库使用
 
@@ -95,21 +105,6 @@ println!("{} published", report.published.len());
 ```
 
 本仓库自己的发布方式是怎样的，见 [`.github/workflows/`](.github/workflows/)。
-
-## `--order`：当推导结果不对时
-
-默认从 manifest 推导，不需要任何配置——哪怕工作区只有一个 crate 也是如此。
-
-当某个 crate **该发布、但 manifest 写着 `publish = false`** 时才需要 `--order`。这个组合是真实
-存在的：以二进制形式安装的工具会声明该 flag 以免被别人当依赖，而同一个 flag 也让
-`harbor publish` 拒绝发布它自己；反过来关掉这个 flag，又会把工作区里其他所有 crate 一起发出去。
-
-```console
-$ cargo harbor --order some-tool publish
-```
-
-`--order` 只负责**选择与排序**，不覆盖依赖图：把 crate 排在其依赖之前会被拒绝，而不是照做。
-另外写的是 **package 名**，不是二进制名——包叫 `some-tool`，二进制叫 `cargo-some-tool`。
 
 ## 不做什么
 
