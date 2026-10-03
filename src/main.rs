@@ -273,7 +273,14 @@ fn print_plan(plan: &harbor::Plan) {
 
     if !plan.excluded().is_empty() {
         let excluded = plan.excluded();
-        println!("\n{} not published (publish = false):", excluded.len());
+        // `not published` would read as "cannot be published". These crates are publishable;
+        // their manifests ask for them to be left out of *this* release, which is a choice
+        // about what is being shipped rather than a property of the crate. What undoes it is
+        // named, because that is the question the line raises.
+        println!(
+            "\n{} excluded from this release by `publish = false`:",
+            excluded.len()
+        );
         for krate in excluded {
             println!("  - {} {}", krate.name, krate.version);
         }
