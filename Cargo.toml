@@ -1,0 +1,56 @@
+[workspace]
+# A workspace of one, and the table is not optional: it ends Cargo's search up the
+# directory tree for a workspace root. Without it, a checkout of this crate sitting
+# beside some other Cargo project would be read as a member of that project — an error
+# that depends on where a user happened to clone things.
+resolver = "2"
+members = ["."]
+
+# harbor — release orchestration for a Cargo workspace.
+#
+# A standalone crate on purpose: it is a tool other repositories can depend on, so it
+# carries its own dependency policy and its own `Cargo.lock` rather than being a member of
+# whichever workspace happens to sit beside it.
+#
+# The package is `harbor` (the library's name) and the binary it installs is
+# `cargo-harbor`, because a Cargo subcommand has to be named this way to be reachable as
+# `cargo harbor`. That is the one place Cargo's convention overrides the nicer name.
+[package]
+name = "harbor"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Release orchestration for Cargo workspaces: compute what publishes in what order, preflight a tag, and drive the registry."
+license = "MIT"
+repository = "https://github.com/imba97/harbor"
+keywords = ["cargo", "release", "publish", "crates-io", "workspace"]
+categories = ["development-tools::cargo-plugins", "development-tools"]
+readme = "README.md"
+
+[lib]
+# Named explicitly so the library is `harbor` even though the package installs a
+# `cargo-harbor` binary: `use harbor::Release` is what a dependent writes.
+name = "harbor"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cargo-harbor"
+path = "src/main.rs"
+
+[dependencies]
+# `clap` for the CLI only. The library takes plain arguments, so a dependent is not
+# forced to share this choice.
+clap = { version = "4", features = ["derive"] }
+# Member patterns are real globs (`crates/*`, and Cargo allows `**`), so they are matched
+# by a glob crate rather than by string surgery that would quietly disagree with Cargo.
+glob = "0.3"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+strip = true
