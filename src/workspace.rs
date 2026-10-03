@@ -31,19 +31,31 @@ pub fn plan(root: &Path, config: &ReleaseConfig) -> Result<Plan> {
     Ok(Plan::new(root.to_path_buf(), graph, order, config.clone()))
 }
 
-/// Reads every workspace member into a graph.
+/// Reads every member of the release into a graph.
+///
+/// "Every member" rather than "every workspace member", because a crate that is its own root
+/// and declares no `[workspace]` table is a perfectly ordinary release — the commonest kind,
+/// even. Such a manifest names exactly one package: itself.
 pub fn load(root: &Path, config: &ReleaseConfig) -> Result<Graph> {
     let root_manifest_path = manifest_path(root);
     let root_manifest = Manifest::read(&root_manifest_path)?;
 
-    let workspace = root_manifest.workspace.as_ref().ok_or_else(|| {
-        Error::manifest(
+    // A virtual manifest names its members in `[workspace] members`. A real crate that is its
+    // own root names none, and its single member is its own directory.
+    //
+    // Treating the missing table as an error is what made `harbor plan` refuse a
+    // single-package crate outright, which is the shape most crates have: only a workspace
+    // that was deliberately split into several packages has the table at all.
+    let workspace = root_manifest.workspace.as_ref();
+    if workspace.is_none() && root_manifest.package.is_none() {
+        return Err(Error::manifest(
             &root_manifest_path,
-            "has no [workspace] table, so there is nothing to release as a unit",
-        )
-    })?;
+            "is neither a workspace (no [workspace] members) nor a package (no [package] \
+             name), so there is nothing to release",
+        ));
+    }
 
-    if workspace.members.is_empty() {
+    if workspace.is_some_and(|w| w.members.is_empty()) {
         return Err(Error::manifest(
             &root_manifest_path,
             "has an empty [workspace] members list",
@@ -51,18 +63,16 @@ pub fn load(root: &Path, config: &ReleaseConfig) -> Result<Graph> {
     }
 
     let workspace_version = workspace
-        .package
-        .as_ref()
+        .and_then(|w| w.package.as_ref())
         .and_then(|p| p.version.as_deref());
     let workspace_publish = workspace
-        .package
-        .as_ref()
+        .and_then(|w| w.package.as_ref())
         .and_then(|p| p.publish.as_ref())
         .map(crate::manifest::Publish::allows);
 
     // Read every member first, then resolve dependencies against that set.
     //
-    // The two passes matter because "is this dependency a crate in this workspace" cannot be
+    // The two passes matter because "is this dependency a crate in this release" cannot be
     // answered by a name prefix. With an empty prefix — the default, and the right default —
     // *every* name matches, so `clap` looks like a sibling crate and a release of a crate
     // that has any dependency at all fails to even compute a plan. The set of members is the
@@ -111,11 +121,11 @@ pub fn load(root: &Path, config: &ReleaseConfig) -> Result<Graph> {
     // rather than through a `Graph` accessor that existed only for this one call.
     if graph.crates().next().is_none() {
         let what = if config.crate_prefix.is_empty() {
-            "the workspace contains no crate that can be published".to_string()
+            "there is no crate that can be published".to_string()
         } else {
             format!(
                 "no crates match the prefix {:?}.\n\
-                 Set `ReleaseConfig::crate_prefix` if this workspace's crates are not named \
+                 Set `ReleaseConfig::crate_prefix` if this release's crates are not named \
                  that way, or leave it empty to consider every crate.",
                 config.crate_prefix
             )
@@ -129,17 +139,26 @@ pub fn load(root: &Path, config: &ReleaseConfig) -> Result<Graph> {
     Ok(graph)
 }
 
-/// Expands the workspace's member patterns into directories that hold a manifest.
+/// The directories that hold the manifests taking part in this release.
+///
+/// A root manifest names its members one of two ways, and both are ordinary: a virtual
+/// manifest lists them in `[workspace] members`, while a single-package crate has exactly
+/// one — its own directory, which it never has to say out loud.
 fn member_dirs(
     root: &Path,
-    workspace: &crate::manifest::Workspace,
+    workspace: Option<&crate::manifest::Workspace>,
     root_manifest_path: &Path,
 ) -> Result<Vec<PathBuf>> {
+    let Some(workspace) = workspace else {
+        return Ok(vec![root.to_path_buf()]);
+    };
+    let patterns = workspace.members.clone();
+    let excludes = workspace.exclude.clone();
+
     // Compiled once. These used to be rebuilt inside `is_excluded` for every candidate
     // against every pattern, which is the same patterns compiled over and over for an
     // answer that cannot change.
-    let excludes: Vec<glob::Pattern> = workspace
-        .exclude
+    let excludes: Vec<glob::Pattern> = excludes
         .iter()
         .map(|pattern| {
             glob::Pattern::new(&join_for_glob(root, pattern).map_err(|what| {
@@ -156,7 +175,7 @@ fn member_dirs(
 
     let mut dirs: Vec<PathBuf> = Vec::new();
 
-    for pattern in &workspace.members {
+    for pattern in &patterns {
         let joined = join_for_glob(root, pattern).map_err(|what| {
             Error::manifest(root_manifest_path, format!("members pattern {what}"))
         })?;
@@ -368,10 +387,51 @@ version = "0.0.5"
     }
 
     #[test]
-    fn a_root_without_a_workspace_table_is_an_error() {
-        let dir = workspace("[package]\nname = \"solo\"\nversion = \"1.0.0\"\n", &[]);
+    fn a_package_that_is_its_own_root_is_a_release_of_one() {
+        // The regression: a manifest with `[package]` and no `[workspace]` table was refused
+        // outright, which is the shape most crates have — only a deliberately split workspace
+        // carries the table at all. It is a release whose single member is itself.
+        let dir = workspace(
+            "[package]\nname = \"acme-solo\"\nversion = \"1.2.3\"\n",
+            &[],
+        );
+        let plan = plan(dir.path(), &config()).unwrap();
+        assert_eq!(plan.names(), vec!["acme-solo"]);
+        assert_eq!(plan.order[0].version, "1.2.3");
+    }
+
+    #[test]
+    fn a_package_with_a_lib_and_two_bins_is_still_one_member() {
+        // Target count is irrelevant to how many packages there are: `cargo-bumpp` ships a
+        // library and two binaries from a single package.
+        let dir = workspace(
+            "[package]\nname = \"acme-tool\"\nversion = \"0.3.1\"\n\n[lib]\nname = \"acme_tool\"\n\n[[bin]]\nname = \"acme-tool\"\n\n[[bin]]\nname = \"acme-toolx\"\n",
+            &[],
+        );
+        let plan = plan(dir.path(), &config()).unwrap();
+        assert_eq!(plan.names(), vec!["acme-tool"]);
+    }
+
+    #[test]
+    fn a_manifest_that_is_neither_a_workspace_nor_a_package_is_an_error() {
+        // Empty, or a manifest with only unrelated tables: there is genuinely nothing to
+        // release, and saying so is better than reporting an empty plan.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[profile.release]\nlto = true\n",
+        )
+        .unwrap();
         let err = plan(dir.path(), &config()).unwrap_err().to_string();
-        assert!(err.contains("[workspace]"), "{err}");
+        assert!(err.contains("neither a workspace"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_members_list_is_still_an_error() {
+        // The table is there and says "no members", which is a mistake rather than a shape.
+        let dir = workspace("[workspace]\nmembers = []\n", &[]);
+        let err = plan(dir.path(), &config()).unwrap_err().to_string();
+        assert!(err.contains("empty"), "{err}");
     }
 
     #[test]
