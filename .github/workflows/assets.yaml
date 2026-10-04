@@ -17,9 +17,10 @@ name: Assets
 #     `pkg-fmt` or `pkg-url` override is needed.
 #
 # Why this exists: harbor is the release tool of several other repositories, and every one of
-# their publish jobs installs it. `cargo install harbor --version <v>` still works and stays
-# the documented default -- these archives are what let those jobs (and a user) skip the
-# build.
+# their publish jobs installs it -- they install it from this archive, because compiling the
+# same tool on every runner of every release is minutes spent on bytes that never change.
+# `cargo install harbor` stays the documented default for a person, and it is what binstall
+# falls back to when an archive is missing.
 #
 # Note that harbor's **own** release does not use this archive: its publish job builds the
 # tool from the tagged commit on purpose, so that the release is checked and driven by the
