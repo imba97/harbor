@@ -1,1 +1,5 @@
 /target
+
+# Where `scripts/package-release.*` writes the release archive.
+/dist
+

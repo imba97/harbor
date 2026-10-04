@@ -121,3 +121,29 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo harbor --root "$HARBOR_ROOT" publish
+
+  # ---------------------------------------------------------------------------
+  # The release archive and its checksum -- see assets.yaml, which owns that pipeline.
+  #
+  # Called from here rather than triggered by its own `on: push: tags`, so it cannot run
+  # before `checks` has passed: "an artifact never lands on a tag whose checks failed" is
+  # then structural, not a matter of which workflow happened to start first.
+  #
+  # It does **not** wait for the crates.io publish. The archive is built from this tag's
+  # source, and nothing in the download path goes through the registry -- the repositories
+  # that use harbor as their release tool install it from this archive, so a slow index or a
+  # registry outage would otherwise delay (or stop) a release that has nothing to do with
+  # either.
+  #
+  # Note the difference from `publish` above: that job installs the tool from *this commit*
+  # on purpose, so the release is driven by the revision being released. This job builds the
+  # same revision for other machines to install later.
+  # ---------------------------------------------------------------------------
+  assets:
+    name: Archive
+    needs: [ checks ]
+    uses: ./.github/workflows/assets.yaml
+    permissions:
+      # The called workflow can only narrow this; it needs to write to the release.
+      contents: write
+

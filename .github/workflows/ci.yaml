@@ -95,6 +95,21 @@ jobs:
           CARGO_TARGET_DIR: ${{ runner.temp }}/package-target
         run: cargo package --locked
 
+      # The release scripts are what a tag runs, and a syntax error in one of them would
+      # first show up while publishing -- the worst moment to find it. Both shells exist on
+      # the Linux runner, so one step covers both.
+      #
+      # Only on Linux: the scripts are already parsed by the shell that runs them there, and
+      # the other two platforms would only repeat the same two lines.
+      - name: The release scripts parse
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n scripts/package-release.sh
+          pwsh -NoProfile -Command '$null = [scriptblock]::Create((Get-Content -Raw scripts/package-release.ps1))'
+          echo "both packaging scripts parse"
+
   # ---------------------------------------------------------------------------
   # MSRV. `rust-version = "1.75"` is a promise; without this job it is only a
   # claim in a manifest.
